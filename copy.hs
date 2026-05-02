@@ -30,10 +30,7 @@ data TripleThreat where
   Or :: TripleThreat -> TripleThreat -> TripleThreat
   Leq :: TripleThreat -> TripleThreat -> TripleThreat
   IsZero :: TripleThreat -> TripleThreat
-  Fix :: TripleThreat -> TripleThreat
-  New :: TripleThreat -> TripleThreat
-  Deref :: TripleThreat -> TripleThreat
-  Set :: TripleThreat -> TripleThreat -> TripleThreat
+  Fix :: TripleThreat -> TripleThreat -- Added fix.
   deriving (Show, Eq)
 
 data TripleThreatExt where
@@ -54,40 +51,62 @@ data TripleThreatExt where
   OrX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
   LeqX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
   IsZeroX :: TripleThreatExt -> TripleThreatExt
-  FixX :: TripleThreatExt -> TripleThreatExt
-  NewX :: TripleThreatExt -> TripleThreatExt
-  DerefX :: TripleThreatExt -> TripleThreatExt
-  SetX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
+  FixX :: TripleThreatExt -> TripleThreatExt -- Added fix.
   deriving (Show, Eq)
 
 data TripleThreatVal where
   NumV :: Int -> TripleThreatVal
   BooleanV :: Bool -> TripleThreatVal
   ClosureV :: String -> TripleThreat -> EnvVal -> TripleThreatVal
-  LocV :: Int -> TripleThreatVal -- New feature with location/storage.
   deriving (Show, Eq)
 
 type EnvVal = [(String, TripleThreatVal)]
 
 type Cont = [(String, TripleThreatType)]
 
-type Loc = Int
+-- Reader & Helper Methods
+data Reader e a = Reader (e -> Maybe a)
 
-type Store = (Loc, StoreFunc)
+ask :: Reader a a
+ask = Reader $ \e -> Just e
 
-type StoreFunc = Loc -> Maybe TripleThreatVal
+runR :: Reader e a -> e -> Maybe a
+runR (Reader f) e = f e
 
-initStore :: Store
-initStore = (0, \_ -> Nothing)
+local :: (e -> t) -> Reader t a -> Reader e a
+local f r = Reader $ \e -> runR r (f e)
 
-setStore :: Store -> Loc -> TripleThreatVal -> Store
-setStore (i, s) l v = (i, \m -> if m == l then Just v else s m)
+useClosure :: String -> TripleThreatVal -> EnvVal -> EnvVal -> EnvVal
+useClosure i v e _ = (i, v) : e
 
-derefStore :: Store -> Loc -> Maybe TripleThreatVal
-derefStore (_, s) l = s l
+-- Helper function I created for adding to the Context.
+addTypeToContext :: String -> TripleThreatType -> Cont -> Cont
+addTypeToContext i v e = (i, v) : e
 
-newStore :: Store -> TripleThreatVal -> (Store, Loc)
-newStore (i, s) v = ((i + 1, \m -> if m == i then Just v else s m), i)
+instance Monad (Reader e) where
+  g >>= f = Reader $ \e ->
+    case runR g e of
+      Nothing -> Nothing
+      Just v -> runR (f v) e
+
+instance Functor (Reader e) where
+  fmap f (Reader g) = Reader $ \e ->
+    case g e of
+      Nothing -> Nothing
+      Just v -> Just (f v)
+
+instance Applicative (Reader e) where
+  pure x = Reader $ \e -> Just x
+  (Reader f) <*> (Reader g) = Reader $ \e ->
+    case f e of
+      Nothing -> Nothing
+      Just h ->
+        case g e of
+          Nothing -> Nothing
+          Just x -> Just (h x)
+
+instance MonadFail (Reader e) where
+  fail _ = Reader $ \_ -> Nothing
 
 -- ========== Project Exercises ========== --
 
@@ -155,242 +174,230 @@ elabTerm (IsZeroX n) = IsZero (elabTerm n) -- Return the KULang equivalent.
 elabTerm (FixX e) = Fix (elabTerm e) -- Return the KULang equivalent.
 
 -- Part 1 - Type Inference
-typeof :: Cont -> TripleThreat -> (Maybe TripleThreatType)
+typeof :: TripleThreat -> Reader Cont TripleThreatType
 -- Check if n is a positive number, then return Maybe TNum, else Nothing.
-typeof g (Num n) = if n >= 0 then return TNum else fail "Fail: Negative Number"
+typeof (Num n) = if n >= 0 then return TNum else fail "Fail: Negative Number"
 -- Return a TBool.
-typeof g (Boolean b) = return TBool
-typeof g (Id i) = (lookup i g)
-typeof g (Plus l r) = do
-  TNum <- typeof g l -- Check if the left is a type of Num as the result.
-  TNum <- typeof g r -- Check if the right is a type of Num as the result.
+typeof (Boolean b) = return TBool
+typeof (Id i) = do
+  context_env <- ask -- Get the current environment from Reader Monad via ask.
+  case lookup i context_env of -- Then, lookup this variable in the environment.
+    Just ty -> return ty -- If the variable is found, then return its type.
+    Nothing -> fail "Fail: Unbound variable in typeof function" -- Otherwise if not found, the variable is not bound.
+typeof (Plus l r) = do
+  TNum <- typeof l -- Check if the left is a type of Num as the result.
+  TNum <- typeof r -- Check if the right is a type of Num as the result.
   return TNum -- If it has evaluated here, then return Maybe Num as the result.
-typeof g (Minus l r) = do
-  TNum <- typeof g l -- Check if the left is a type of Num as the result.
-  TNum <- typeof g r -- Check if the right is a type of Num as the result.
+typeof (Minus l r) = do
+  TNum <- typeof l -- Check if the left is a type of Num as the result.
+  TNum <- typeof r -- Check if the right is a type of Num as the result.
   return TNum -- If it has evaluated here, then return Maybe Num as the result.
-typeof g (Mult l r) = do
-  TNum <- typeof g l -- Check if the left is a type of Num as the result.
-  TNum <- typeof g r -- Check if the right is a type of Num as the result.
+typeof (Mult l r) = do
+  TNum <- typeof l -- Check if the left is a type of Num as the result.
+  TNum <- typeof r -- Check if the right is a type of Num as the result.
   return TNum -- If it has evaluated here, then return Maybe Num as the result.
-typeof g (Div l r) = do
-  TNum <- typeof g l -- Check if the left is a type of Num as the result.
-  TNum <- typeof g r -- Check if the right is a type of Num as the result.
+typeof (Div l r) = do
+  TNum <- typeof l -- Check if the left is a type of Num as the result.
+  TNum <- typeof r -- Check if the right is a type of Num as the result.
   return TNum -- If it has evaluated here, then return Maybe Num as the result.
-typeof g (Exp l r) = do
-  TNum <- typeof g l -- Check if the left is a type of Num as the result.
-  TNum <- typeof g r -- Check if the right is a type of Num as the result.
+typeof (Exp l r) = do
+  TNum <- typeof l -- Check if the left is a type of Num as the result.
+  TNum <- typeof r -- Check if the right is a type of Num as the result.
   return TNum -- If it has evaluated here, then return Maybe Num as the result.
-typeof g (Between first second third) = do
-  TNum <- typeof g first -- Check if first is a type of Num.
-  TNum <- typeof g second -- Check if second is a type of Num.
-  TNum <- typeof g third -- Check if third is a type of Num.
+typeof (Between first second third) = do
+  TNum <- typeof first -- Check if first is a type of Num.
+  TNum <- typeof second -- Check if second is a type of Num.
+  TNum <- typeof third -- Check if third is a type of Num.
   -- If it has evaluated here, then return TBool.
   return TBool
-typeof g (Lambda i d b) = do
-  r <- typeof ((i, d) : g) b
+typeof (Lambda i d b) = do
+  -- Get the local context env, but before that, make sure to add the new pair: (i, d) to the context.
+  -- Then, get the type of the body to know what the range is.
+  r <- local (addTypeToContext i d) (typeof b)
+  -- Once we know the range, make the mapping of the function's type be d:->:r.
   return (d :->: r)
-typeof g (App f a) = do
-  apply <- typeof g a -- Check that the application to the function is a type in our language.
-  (d :->: r) <- typeof g f -- The f parameter should be a function, meaning that it should have a D:->:R type.
+typeof (App f a) = do
+  apply <- typeof a -- Check that the application to the function is a type in our language.
+  (d :->: r) <- typeof f -- The f parameter should be a function, meaning that it should have a D:->:R type.
   -- If the application type is the same as the domain, then this parameter is accepted into the function and the output type of the function is the range.
   -- Otherwise, there's a type mismatch and the function can't be evaluated with this application.
   if apply == d then return r else fail "Fail: The type of the application and the domain of the function do not match."
-typeof g (If c t e) = do
-  TBool <- typeof g c -- Check if c is a type of Bool.
-  t' <- typeof g t -- Check if t is a type of KUTypeLang.
-  e' <- typeof g e -- Check if e is a type of KUTypeLang.
+typeof (If c t e) = do
+  TBool <- typeof c -- Check if c is a type of Bool.
+  t' <- typeof t -- Check if t is a type of KUTypeLang.
+  e' <- typeof e -- Check if e is a type of KUTypeLang.
   -- If it has evaluated here, then check if the branch types are the same for then and else and return that type, else Nothing.
   (if t' == e' then return t' else fail "Fail: The branches don't have the same type.")
-typeof g (And l r) = do
-  TBool <- typeof g l -- Check if the left is a type of Boolean.
-  TBool <- typeof g r -- Check if the right is a type of Boolean.
+typeof (And l r) = do
+  TBool <- typeof l -- Check if the left is a type of Boolean.
+  TBool <- typeof r -- Check if the right is a type of Boolean.
   return TBool -- If it has evaluated here, then return Maybe TBool as the result.
-typeof g (Or l r) = do
-  TBool <- typeof g l -- Check if the left is a type of Boolean.
-  TBool <- typeof g r -- Check if the right is a type of Boolean.
+typeof (Or l r) = do
+  TBool <- typeof l -- Check if the left is a type of Boolean.
+  TBool <- typeof r -- Check if the right is a type of Boolean.
   return TBool -- If it has evaluated here, then return Maybe TBool as the result.
-typeof g (Leq l r) = do
-  TNum <- typeof g l -- Check if the left is a type of Num.
-  TNum <- typeof g r -- Check if the right is a type of Num.
+typeof (Leq l r) = do
+  TNum <- typeof l -- Check if the left is a type of Num.
+  TNum <- typeof r -- Check if the right is a type of Num.
   return TBool -- If it has evaluated here, then return Maybe TBool as the result.
-typeof g (IsZero n) = do
-  TNum <- typeof g n -- Check if n is a type of Num.
+typeof (IsZero n) = do
+  TNum <- typeof n -- Check if n is a type of Num.
   return TBool -- If it has evaluated here, then return Maybe TBool as the result.
-typeof g (Fix f) = do
-  (d :->: r) <- typeof g f -- Need to ensure that the given parameter is a function, which has a type of D:->:R.
+typeof (Fix f) = do
+  (d :->: r) <- typeof f -- Need to ensure that the given parameter is a function, which has a type of D:->:R.
   return r -- The type of the Fix is the range of the function.
 
 -- Part 2 - Evaluation
-eval :: EnvVal -> Store -> TripleThreat -> Maybe (Store, TripleThreatVal)
-eval env sto (Num x) = if x < 0 then fail "Fail: Negative Number" else return (sto, (NumV x))
-eval env sto (Boolean b) = return (sto, (BooleanV b)) -- Return the Boolean type.
-eval env sto (Id i) = do
-  val <- lookup i env -- Once we hit an identifier, then look it up from the Env list and return that value.
-  return (sto, val)
-eval env sto (Plus l r) = do
+eval :: TripleThreat -> Reader EnvVal TripleThreatVal
+eval (Num x) = if x < 0 then fail "Fail: Negative Number" else return (NumV x)
+eval (Boolean b) = return (BooleanV b) -- Return the Boolean type.
+eval (Id i) = do
+  env <- ask -- First, get the environment.
+  case lookup i env of -- Try to lookup the identifier in the environment.
+    Just x -> return x -- If we find it, return it.
+    Nothing -> fail "Fail: Unbound variable." -- If we don't find it, then fail.
+eval (Plus l r) = do
   -- Evaluate the left and right-hand side and try to do x+y. If error, Monad returns Nothing.
-  (sto1, (NumV x)) <- eval env sto l -- Type cast to NumV to check if l is NumV.
-  (sto2, (NumV y)) <- eval env sto1 r -- Type cast to NumV to check if r is NumV.
-  return (sto2, (NumV (x + y))) -- Once both are checked, return x + y and type-cast as Maybe NumV.
-eval env sto (Minus l r) = do
+  (NumV x) <- eval l -- Type cast to NumV to check if l is NumV.
+  (NumV y) <- eval r -- Type cast to NumV to check if r is NumV.
+  return (NumV (x + y)) -- Once both are checked, return x + y and type-cast as Maybe NumV.
+eval (Minus l r) = do
   -- Evaluate the left and right-hand side and try to do x-y. If error, Monad returns Nothing.
-  (sto1, (NumV x)) <- eval env sto l -- Type cast to NumV to check if l is NumV.
-  (sto2, (NumV y)) <- eval env sto1 r -- Type cast to NumV to check if r is NumV.
+  (NumV x) <- eval l -- Type cast to NumV to check if l is NumV.
+  (NumV y) <- eval r -- Type cast to NumV to check if r is NumV.
   let sub = x - y -- Once both are checked, return x - y and type-cast as Maybe Num if not less than 0.
    in if sub < 0
         then fail "Fail: Negative Number from Minus"
         else
-          return (sto2, (NumV sub))
-eval env sto (Mult l r) = do
+          return (NumV sub)
+eval (Mult l r) = do
   -- Evaluate the left and right-hand side and try to do x-y. If error, Monad returns Nothing.
-  (sto1, (NumV x)) <- eval env sto l -- Type cast to NumV to check if l is NumV.
-  (sto2, (NumV y)) <- eval env sto1 r -- Type cast to NumV to check if r is NumV.
-  return (sto2, (NumV (x * y))) -- Once both are checked, return x - y and type-cast as Maybe NumV.
-eval env sto (Div l r) = do
+  (NumV x) <- eval l -- Type cast to NumV to check if l is NumV.
+  (NumV y) <- eval r -- Type cast to NumV to check if r is NumV.
+  return (NumV (x * y)) -- Once both are checked, return x - y and type-cast as Maybe NumV.
+eval (Div l r) = do
   -- Evaluate the left and right-hand side and try to do x/y. If error, Monad returns Nothing.
-  (sto1, (NumV x)) <- eval env sto l
-  (sto2, (NumV y)) <- eval env sto1 r
+  (NumV x) <- eval l
+  (NumV y) <- eval r
   if y == 0 -- Check if the denominator returned as 0, then do Nothing.
     then fail "Fail: Division by zero"
     else
-      return (sto2, (NumV (x `div` y)))
-eval env sto (Exp l r) = do
+      return (NumV (x `div` y))
+eval (Exp l r) = do
   -- Evaluate the left and right-hand side and try to do x-y. If error, Monad returns Nothing.
-  (sto1, (NumV x)) <- eval env sto l -- Type cast to NumV to check if l is NumV.
-  (sto2, (NumV y)) <- eval env sto1 r -- Type cast to NumV to check if r is NumV.
-  return (sto2, (NumV (x ^ y))) -- Once both are checked, return x - y and type-cast as Maybe NumV.
-eval env sto (Between first second third) = do
+  (NumV x) <- eval l -- Type cast to NumV to check if l is NumV.
+  (NumV y) <- eval r -- Type cast to NumV to check if r is NumV.
+  return (NumV (x ^ y)) -- Once both are checked, return x - y and type-cast as Maybe NumV.
+eval (Between first second third) = do
   -- First, we need to check that each argument returns as a Num.
-  (sto1, (NumV n1)) <- eval env sto first -- Type cast to Num to check if first is Num.
-  (sto2, (NumV n2)) <- eval env sto1 second -- Type cast to Num to check if second is Num.
-  (sto3, (NumV n3)) <- eval env sto2 third -- Type cast to Num to check if third is Num.
-  return (sto3, (BooleanV ((n2 > n1) && (n3 > n2)))) -- Return if n2 > n1 and n3 > n2.
-eval env sto (Lambda i _ body) = do
-  return (sto, (ClosureV i body env)) -- Then, create the Closure of this lambda function with the environment.
-eval env sto (App f a) = do
-  (sto1, (ClosureV i b ce)) <- eval env sto f -- Check if the function returns a Closure with its corresponding closure environment.
-  (sto2, val) <- eval env sto1 a -- Check that the application returns something in the language.
+  (NumV n1) <- eval first -- Type cast to Num to check if first is Num.
+  (NumV n2) <- eval second -- Type cast to Num to check if second is Num.
+  (NumV n3) <- eval third -- Type cast to Num to check if third is Num.
+  return (BooleanV ((n2 > n1) && (n3 > n2))) -- Return if n2 > n1 and n3 > n2.
+eval (Lambda i _ body) = do
+  env <- ask -- Get the current global environment via ask.
+  return (ClosureV i body env) -- Then, create the Closure of this lambda function with the environment.
+eval (App f a) = do
+  (ClosureV i b ce) <- eval f -- Check if the function returns a Closure with its corresponding closure environment.
+  val <- eval a -- Check that the application returns something in the language.
   -- Use the local closure of the ClosureV by adding the new binding and then evaluate the body with that env.
-  eval ((i, val) : ce) sto2 b
-eval env sto (If c t e) = do
+  local (useClosure i val ce) (eval b)
+eval (If c t e) = do
   -- First, we need to check that the condition returns as a Boolean.
-  (sto1, BooleanV cond) <- eval env sto c -- Type cast to Boolean to check if c is Boolean.
-  if cond then eval env sto1 t else eval env sto1 e -- If the condition is True, return t' else return e'.
-eval env sto (And l r) = do
+  (BooleanV cond) <- eval c -- Type cast to Boolean to check if c is Boolean.
+  if cond then eval t else eval e -- If the condition is True, return t' else return e'.
+eval (And l r) = do
   -- First, we need to check that both the left and right side are Booleans to evaluate this expression.
-  (sto1, (BooleanV x)) <- eval env sto l -- Type cast to Boolean to check if l is Boolean.
-  (sto2, (BooleanV y)) <- eval env sto1 r -- Type cast to Boolean to check if r is Boolean.
-  return (sto2, (BooleanV (x && y))) -- Once both are checked, return x && y and type-cast as Maybe Boolean.
-eval env sto (Or l r) = do
+  (BooleanV x) <- eval l -- Type cast to Boolean to check if l is Boolean.
+  (BooleanV y) <- eval r -- Type cast to Boolean to check if r is Boolean.
+  return (BooleanV (x && y)) -- Once both are checked, return x && y and type-cast as Maybe Boolean.
+eval (Or l r) = do
   -- First, we need to check that both the left and right side are Booleans to evaluate this expression.
-  (sto1, (BooleanV x)) <- eval env sto l -- Type cast to Boolean to check if l is Boolean.
-  (sto2, (BooleanV y)) <- eval env sto1 r -- Type cast to Boolean to check if r is Boolean.
-  return (sto2, (BooleanV (x || y))) -- Once both are checked, return x || y and type-cast as Maybe Boolean.
-eval env sto (Leq l r) = do
+  (BooleanV x) <- eval l -- Type cast to Boolean to check if l is Boolean.
+  (BooleanV y) <- eval r -- Type cast to Boolean to check if r is Boolean.
+  return (BooleanV (x || y)) -- Once both are checked, return x || y and type-cast as Maybe Boolean.
+eval (Leq l r) = do
   -- First, we need to check that both the left and right side are numbers to check which is less.
-  (sto1, (NumV x)) <- eval env sto l -- Type cast to Num to check if l is Num.
-  (sto2, (NumV y)) <- eval env sto1 r -- Type cast to Num to check if r is Num.
-  return (sto2, (BooleanV (x <= y))) -- Once both are checked, return if x < y and type-cast as Maybe Boolean.
-eval env sto (IsZero n) = do
+  (NumV x) <- eval l -- Type cast to Num to check if l is Num.
+  (NumV y) <- eval r -- Type cast to Num to check if r is Num.
+  return (BooleanV (x <= y)) -- Once both are checked, return if x < y and type-cast as Maybe Boolean.
+eval (IsZero n) = do
   -- First, we need to check that the given input is a Num in our language.
-  (sto1, (NumV x)) <- eval env sto n -- Type cast to Num to check if n is Num.
-  return (sto1, (BooleanV (x == 0))) -- Once both are checked, return if x == 0 and type-cast as Maybe Boolean.
-eval env sto (Fix f) = do
-  (sto1, (ClosureV i b ce)) <- eval env sto f -- Make sure that the function given returns a ClosureV with the environment.
+  (NumV x) <- eval n -- Type cast to Num to check if n is Num.
+  return (BooleanV (x == 0)) -- Once both are checked, return if x == 0 and type-cast as Maybe Boolean.
+eval (Fix f) = do
+  (ClosureV i b env) <- eval f -- Make sure that the function given returns a ClosureV with the environment.
   -- Get the local environment and we need to keep the function in scope by substituting to keep the Lambda. The type of Lambda no longer matters since we've done typeof.
   -- Then, we need to do eval on this to evaluate the recursion and the body.
-  (eval ce sto1 (substitution i (Fix (Lambda i TNum b)) b))
-eval env sto (New t) = do
-  (sto1, v) <- eval env sto t
-  let (sto2, loc) = newStore sto1 v
-  return (sto2, LocV loc)
-eval env sto (Deref t) = do
-  (sto1, LocV l) <- eval env sto t
-  v <- derefStore sto1 l
-  return (sto1, v)
-eval env sto (Set l v) = do
-  (sto1, LocV loc) <- eval env sto l
-  (sto2, val) <- eval env sto1 v
-  let sto3 = setStore sto2 loc val
-  return (sto3, val)
+  local (const env) (eval (substitution i (Fix (Lambda i TNum b)) b))
 
 -- Part 3 - Add the Fixed Point Operator
 
 -- Part 4 - Interpretation
--- interpret :: TripleThreatExt -> Maybe TripleThreatVal
--- interpret expr =
---   let elab_expr = elabTerm expr -- First elaborate the expression given.
---   -- Then apply the typeOf function to this elaborated expression.
---    in case (typeof [] elab_expr) of
---         Nothing -> Nothing -- The first case is if the types are not correct, return Nothing.
---         -- Otherwise, if something is returned, then run evaluation on elaborated expression.
---         Just _ -> (eval [] elab_expr)
+interpret :: TripleThreatExt -> Maybe TripleThreatVal
+interpret expr =
+  let elab_expr = elabTerm expr -- First elaborate the expression given.
+  -- Then apply the typeOf function to this elaborated expression.
+   in case runR (typeof elab_expr) [] of
+        Nothing -> Nothing -- The first case is if the types are not correct, return Nothing.
+        -- Otherwise, if something is returned, then run evaluation on elaborated expression.
+        Just _ -> runR (eval elab_expr) []
 
 -- Test Cases
 
--- -- Result should be NumV 1 for fibonnaci of 2.
--- testFib =
---   interpret
---     ( BindX
---         "fib"
---         (TNum :->: TNum)
---         ( FixX
---             ( LambdaX
---                 "g"
---                 (TNum :->: TNum)
---                 ( LambdaX
---                     "x"
---                     TNum
---                     ( IfX
---                         (LeqX (IdX "x") (NumX 1))
---                         (IdX "x")
---                         ( PlusX
---                             (AppX (IdX "g") (MinusX (IdX "x") (NumX 1)))
---                             (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
---                         )
---                     )
---                 )
---             )
---         )
---         (AppX (IdX "fib") (NumX 2))
---     )
---     == Just (NumV 1)
+-- Result should be NumV 1 for fibonnaci of 2.
+testFib =
+  interpret
+    ( BindX
+        "fib"
+        (TNum :->: TNum)
+        ( FixX
+            ( LambdaX
+                "g"
+                (TNum :->: TNum)
+                ( LambdaX
+                    "x"
+                    TNum
+                    ( IfX
+                        (LeqX (IdX "x") (NumX 1))
+                        (IdX "x")
+                        ( PlusX
+                            (AppX (IdX "g") (MinusX (IdX "x") (NumX 1)))
+                            (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
+                        )
+                    )
+                )
+            )
+        )
+        (AppX (IdX "fib") (NumX 2))
+    )
+    == Just (NumV 1)
 
--- -- This is testing if a number is even by subtracting 2 until it becomes less than 1 or 0. Result should be False.
--- testIsEven =
---   interpret
---     ( BindX
---         "isEven"
---         (TNum :->: TBool)
---         ( FixX
---             ( LambdaX
---                 "g"
---                 (TNum :->: TBool)
---                 ( LambdaX
---                     "x"
---                     TNum
---                     ( IfX
---                         (IsZeroX (IdX "x"))
---                         (BooleanX True)
---                         ( IfX
---                             (LeqX (IdX "x") (NumX 1))
---                             (BooleanX False)
---                             (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
---                         )
---                     )
---                 )
---             )
---         )
---         (AppX (IdX "isEven") (NumX 67))
---     )
---     == Just (BooleanV False)
-
--- Me testing the eval func after adding Storage.
--- run :: TripleThreat -> Maybe TripleThreatVal
--- run t =
---   case eval [] initStore t of
---     Just (_, v) -> Just v
---     Nothing -> Nothing
-
--- Ex.: run (Deref (New (Num 3)))
+-- This is testing if a number is even by subtracting 2 until it becomes less than 1 or 0. Result should be False.
+testIsEven =
+  interpret
+    ( BindX
+        "isEven"
+        (TNum :->: TBool)
+        ( FixX
+            ( LambdaX
+                "g"
+                (TNum :->: TBool)
+                ( LambdaX
+                    "x"
+                    TNum
+                    ( IfX
+                        (IsZeroX (IdX "x"))
+                        (BooleanX True)
+                        ( IfX
+                            (LeqX (IdX "x") (NumX 1))
+                            (BooleanX False)
+                            (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
+                        )
+                    )
+                )
+            )
+        )
+        (AppX (IdX "isEven") (NumX 67))
+    )
+    == Just (BooleanV False)
