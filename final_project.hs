@@ -10,7 +10,8 @@ data TripleThreatType where
   TNum :: TripleThreatType
   TBool :: TripleThreatType
   (:->:) :: TripleThreatType -> TripleThreatType -> TripleThreatType
-  TClosure :: String -> TripleThreatType -> Cont -> TripleThreatType
+  TLoc :: TripleThreatType -> TripleThreatType
+  TString :: TripleThreatType
   deriving (Show, Eq)
 
 data TripleThreat where
@@ -31,9 +32,14 @@ data TripleThreat where
   Leq :: TripleThreat -> TripleThreat -> TripleThreat
   IsZero :: TripleThreat -> TripleThreat
   Fix :: TripleThreat -> TripleThreat
+  -- Feature 1: Storage.
   New :: TripleThreat -> TripleThreat
   Deref :: TripleThreat -> TripleThreat
   Set :: TripleThreat -> TripleThreat -> TripleThreat
+  -- Feature  2: Concatenation.
+  Concat :: TripleThreat -> TripleThreat -> TripleThreat
+  StringLang :: String -> TripleThreat
+  -- Feature 3: Pattern Matching.
   deriving (Show, Eq)
 
 data TripleThreatExt where
@@ -55,9 +61,14 @@ data TripleThreatExt where
   LeqX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
   IsZeroX :: TripleThreatExt -> TripleThreatExt
   FixX :: TripleThreatExt -> TripleThreatExt
+  -- Feature 1: Storage.
   NewX :: TripleThreatExt -> TripleThreatExt
   DerefX :: TripleThreatExt -> TripleThreatExt
   SetX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
+  -- Feature 2: Concatenation.
+  ConcatX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
+  StringLangX :: String -> TripleThreatExt
+  -- Feature 3: Pattern Matching.
   deriving (Show, Eq)
 
 data TripleThreatVal where
@@ -65,6 +76,7 @@ data TripleThreatVal where
   BooleanV :: Bool -> TripleThreatVal
   ClosureV :: String -> TripleThreat -> EnvVal -> TripleThreatVal
   LocV :: Int -> TripleThreatVal -- New feature with location/storage.
+  StringV :: String -> TripleThreatVal -- New feature for Concatenation.
   deriving (Show, Eq)
 
 type EnvVal = [(String, TripleThreatVal)]
@@ -133,6 +145,15 @@ substitution i v (Lambda x ty body) =
     else Lambda x ty (substitution i v body)
 -- For fix, see if the variable can be substituted into the function.
 substitution i v (Fix f) = Fix (substitution i v f)
+-- val could be a Num or Id, or other. Ex.: sub x=5 in (New x).
+substitution i v (New val) = New (substitution i v val)
+-- l and val could be a Num or Id, or other. Ex.: sub x=5 in (Set l x).
+substitution i v (Set l val) = Set (substitution i v l) (substitution i v val)
+-- l could be a Num or Id, or other. Ex.: sub x=5 in (Deref l), where l has an expression with x in it.
+substitution i v (Deref l) = Deref (substitution i v l)
+-- l could be a StringLang or Id, or other. Ex.: sub x="A" in Concat (x "B")
+substitution i v (Concat l r) = Concat (substitution i v l) (substitution i v r)
+substitution i v (StringLang str) = StringLang str
 
 elabTerm :: TripleThreatExt -> TripleThreat
 elabTerm (NumX n) = Num n -- Return the KULang equivalent.
@@ -153,6 +174,11 @@ elabTerm (OrX l r) = Or (elabTerm l) (elabTerm r) -- Return the KULang equivalen
 elabTerm (LeqX l r) = Leq (elabTerm l) (elabTerm r) -- Return the KULang equivalent.
 elabTerm (IsZeroX n) = IsZero (elabTerm n) -- Return the KULang equivalent.
 elabTerm (FixX e) = Fix (elabTerm e) -- Return the KULang equivalent.
+elabTerm (NewX v) = New (elabTerm v) -- Return the KULang equivalent.
+elabTerm (SetX l v) = Set (elabTerm l) (elabTerm v) -- Return the KULang equivalent.
+elabTerm (DerefX l) = Deref (elabTerm l) -- Return the KULang equivalent.
+elabTerm (ConcatX l r) = Concat (elabTerm l) (elabTerm r) -- Return the KULang equivalent.
+elabTerm (StringLangX str) = StringLang str -- Return the KULang equivalent.
 
 -- Part 1 - Type Inference
 typeof :: Cont -> TripleThreat -> (Maybe TripleThreatType)
@@ -198,8 +224,8 @@ typeof g (App f a) = do
   if apply == d then return r else fail "Fail: The type of the application and the domain of the function do not match."
 typeof g (If c t e) = do
   TBool <- typeof g c -- Check if c is a type of Bool.
-  t' <- typeof g t -- Check if t is a type of KUTypeLang.
-  e' <- typeof g e -- Check if e is a type of KUTypeLang.
+  t' <- typeof g t -- Check if t is a type of TripleThreatType.
+  e' <- typeof g e -- Check if e is a type of TripleThreatType.
   -- If it has evaluated here, then check if the branch types are the same for then and else and return that type, else Nothing.
   (if t' == e' then return t' else fail "Fail: The branches don't have the same type.")
 typeof g (And l r) = do
@@ -220,6 +246,21 @@ typeof g (IsZero n) = do
 typeof g (Fix f) = do
   (d :->: r) <- typeof g f -- Need to ensure that the given parameter is a function, which has a type of D:->:R.
   return r -- The type of the Fix is the range of the function.
+typeof g (New v) = do
+  val_type <- typeof g v -- Check the type of the value t.
+  return (TLoc val_type) -- Returns TLoc and the type of t.
+typeof g (Set l v) = do
+  TLoc cur_val_type <- typeof g l -- First, we check that the type of the location is a TLoc.
+  val_type <- typeof g v -- Ensure that v is in the type of our language.
+  return val_type -- Return the type of the new value.
+typeof g (Deref l) = do
+  TLoc val_type <- typeof g l -- Checks if the type of t is a TLoc.
+  return val_type -- Returns the type of the value in the location.
+typeof g (Concat l r) = do
+  TString <- typeof g l -- Checks if the left is a type of String.
+  TString <- typeof g r -- Checks if the right is a type of String.
+  return TString -- If it has evaluated here, then return Maybe TString as the result.
+typeof g (StringLang str) = return TString -- Return a TString if given a String.
 
 -- Part 2 - Evaluation
 eval :: EnvVal -> Store -> TripleThreat -> Maybe (Store, TripleThreatVal)
@@ -301,96 +342,295 @@ eval env sto (Fix f) = do
   -- Get the local environment and we need to keep the function in scope by substituting to keep the Lambda. The type of Lambda no longer matters since we've done typeof.
   -- Then, we need to do eval on this to evaluate the recursion and the body.
   (eval ce sto1 (substitution i (Fix (Lambda i TNum b)) b))
-eval env sto (New t) = do
-  (sto1, v) <- eval env sto t
-  let (sto2, loc) = newStore sto1 v
-  return (sto2, LocV loc)
-eval env sto (Deref t) = do
-  (sto1, LocV l) <- eval env sto t
-  v <- derefStore sto1 l
-  return (sto1, v)
+eval env sto (New v) = do
+  (sto1, v') <- eval env sto v -- Evaluate the value given to store in the next fresh location.
+  let (sto2, loc) = newStore sto1 v' -- Call the newStore function to set the value at the fresh location and increment it.
+  return (sto2, LocV loc) -- Then, return the updated store and the location that the value was just added to.
+eval env sto (Deref l) = do
+  (sto1, LocV l') <- eval env sto l -- Evaluate the given location to obtain a location.
+  v <- derefStore sto1 l' -- Dereference the value at that location.
+  return (sto1, v) -- Then, return the value.
 eval env sto (Set l v) = do
-  (sto1, LocV loc) <- eval env sto l
-  (sto2, val) <- eval env sto1 v
-  let sto3 = setStore sto2 loc val
-  return (sto3, val)
+  (sto1, LocV loc) <- eval env sto l -- Evaluate the given location to obtain a location.
+  (sto2, val) <- eval env sto1 v -- Evaluate the value given the updated store.
+  let sto3 = setStore sto2 loc val -- Update the store to the value at the location.
+  return (sto3, val) -- Update the store along with the assigned value.
+eval env sto (Concat l r) = do
+  (sto1, (StringV x)) <- eval env sto l -- Type cast to StringV to check if l is a string.
+  (sto2, (StringV y)) <- eval env sto r -- Type cast to StringV to check if r is a string.
+  return (sto2, StringV (x ++ y)) -- Return the concatenate the strings together.
+eval env sto (StringLang str) = do
+  return (sto, (StringV str)) -- Return the StringV type.
 
--- Part 3 - Add the Fixed Point Operator
-
--- Part 4 - Interpretation
--- interpret :: TripleThreatExt -> Maybe TripleThreatVal
--- interpret expr =
---   let elab_expr = elabTerm expr -- First elaborate the expression given.
---   -- Then apply the typeOf function to this elaborated expression.
---    in case (typeof [] elab_expr) of
---         Nothing -> Nothing -- The first case is if the types are not correct, return Nothing.
---         -- Otherwise, if something is returned, then run evaluation on elaborated expression.
---         Just _ -> (eval [] elab_expr)
+-- Part 3 - Interpretation
+interpret :: TripleThreatExt -> Maybe TripleThreatVal
+interpret expr =
+  let elab_expr = elabTerm expr -- First elaborate the expression given.
+  -- Then apply the typeOf function to this elaborated expression.
+   in case (typeof [] elab_expr) of
+        Nothing -> Nothing -- The first case is if the types are not correct, return Nothing.
+        -- Otherwise, if something is returned, then run evaluation on elaborated expression.
+        Just _ -> case eval [] initStore elab_expr of
+          Nothing -> Nothing -- If eval had an error, then return Nothing.
+          Just (_, v) -> Just v -- Otherwise, just return the value and not the Store to the use
 
 -- Test Cases
 
--- -- Result should be NumV 1 for fibonnaci of 2.
--- testFib =
---   interpret
---     ( BindX
---         "fib"
---         (TNum :->: TNum)
---         ( FixX
---             ( LambdaX
---                 "g"
---                 (TNum :->: TNum)
---                 ( LambdaX
---                     "x"
---                     TNum
---                     ( IfX
---                         (LeqX (IdX "x") (NumX 1))
---                         (IdX "x")
---                         ( PlusX
---                             (AppX (IdX "g") (MinusX (IdX "x") (NumX 1)))
---                             (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
---                         )
---                     )
---                 )
---             )
---         )
---         (AppX (IdX "fib") (NumX 2))
---     )
---     == Just (NumV 1)
+-- Result should be NumV 1 for fibonnaci of 2.
+testFib =
+  interpret
+    ( BindX
+        "fib"
+        (TNum :->: TNum)
+        ( FixX
+            ( LambdaX
+                "g"
+                (TNum :->: TNum)
+                ( LambdaX
+                    "x"
+                    TNum
+                    ( IfX
+                        (LeqX (IdX "x") (NumX 1))
+                        (IdX "x")
+                        ( PlusX
+                            (AppX (IdX "g") (MinusX (IdX "x") (NumX 1)))
+                            (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
+                        )
+                    )
+                )
+            )
+        )
+        (AppX (IdX "fib") (NumX 2))
+    )
+    == Just (NumV 1)
 
--- -- This is testing if a number is even by subtracting 2 until it becomes less than 1 or 0. Result should be False.
--- testIsEven =
---   interpret
---     ( BindX
---         "isEven"
---         (TNum :->: TBool)
---         ( FixX
---             ( LambdaX
---                 "g"
---                 (TNum :->: TBool)
---                 ( LambdaX
---                     "x"
---                     TNum
---                     ( IfX
---                         (IsZeroX (IdX "x"))
---                         (BooleanX True)
---                         ( IfX
---                             (LeqX (IdX "x") (NumX 1))
---                             (BooleanX False)
---                             (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
---                         )
---                     )
---                 )
---             )
---         )
---         (AppX (IdX "isEven") (NumX 67))
---     )
---     == Just (BooleanV False)
+-- This is testing if a number is even by subtracting 2 until it becomes less than 1 or 0. Result should be False.
+testIsEven =
+  interpret
+    ( BindX
+        "isEven"
+        (TNum :->: TBool)
+        ( FixX
+            ( LambdaX
+                "g"
+                (TNum :->: TBool)
+                ( LambdaX
+                    "x"
+                    TNum
+                    ( IfX
+                        (IsZeroX (IdX "x"))
+                        (BooleanX True)
+                        ( IfX
+                            (LeqX (IdX "x") (NumX 1))
+                            (BooleanX False)
+                            (AppX (IdX "g") (MinusX (IdX "x") (NumX 2)))
+                        )
+                    )
+                )
+            )
+        )
+        (AppX (IdX "isEven") (NumX 67))
+    )
+    == Just (BooleanV False)
 
--- Me testing the eval func after adding Storage.
--- run :: TripleThreat -> Maybe TripleThreatVal
--- run t =
---   case eval [] initStore t of
---     Just (_, v) -> Just v
---     Nothing -> Nothing
+testNewDeref =
+  interpret (DerefX (NewX (NumX 3)))
+    == Just (NumV 3)
 
--- Ex.: run (Deref (New (Num 3)))
+testSetSimple =
+  interpret (SetX (NewX (NumX 3)) (NumX 6))
+    == Just (NumV 6)
+
+testSetThenDeref =
+  interpret
+    ( BindX
+        "l"
+        (TLoc TNum)
+        (NewX (NumX 3))
+        ( BindX
+            "_"
+            TNum
+            (SetX (IdX "l") (NumX 6))
+            (DerefX (IdX "l"))
+        )
+    )
+    == Just (NumV 6)
+
+testIncrement =
+  interpret
+    ( BindX
+        "l"
+        (TLoc TNum)
+        (NewX (NumX 5))
+        ( BindX
+            "_"
+            TNum
+            ( SetX
+                (IdX "l")
+                (PlusX (DerefX (IdX "l")) (NumX 1))
+            )
+            (DerefX (IdX "l"))
+        )
+    )
+    == Just (NumV 6)
+
+testAliasing =
+  interpret
+    ( BindX
+        "m"
+        (TLoc TNum)
+        (NewX (NumX 5))
+        ( BindX
+            "n"
+            (TLoc TNum)
+            (IdX "m")
+            ( BindX
+                "_"
+                TNum
+                (SetX (IdX "m") (NumX 6))
+                (DerefX (IdX "n"))
+            )
+        )
+    )
+    == Just (NumV 6)
+
+testShadowing =
+  interpret
+    ( BindX
+        "m"
+        (TLoc TNum)
+        (NewX (NumX 5))
+        ( BindX
+            "n"
+            (TLoc TNum)
+            (IdX "m")
+            ( BindX
+                "n"
+                (TLoc TNum)
+                (NewX (NumX 7))
+                (DerefX (IdX "n"))
+            )
+        )
+    )
+    == Just (NumV 7)
+
+testFunctionMutation =
+  interpret
+    ( BindX
+        "inc"
+        (TLoc TNum :->: TNum)
+        ( LambdaX
+            "l"
+            (TLoc TNum)
+            ( BindX
+                "_"
+                TNum
+                ( SetX
+                    (IdX "l")
+                    (PlusX (DerefX (IdX "l")) (NumX 1))
+                )
+                (DerefX (IdX "l"))
+            )
+        )
+        ( BindX
+            "n"
+            (TLoc TNum)
+            (NewX (NumX 5))
+            (AppX (IdX "inc") (IdX "n"))
+        )
+    )
+    == Just (NumV 6)
+
+testNestedMutation =
+  interpret
+    ( BindX
+        "l"
+        (TLoc TNum)
+        (NewX (NumX 1))
+        ( BindX
+            "_"
+            TNum
+            ( SetX
+                (IdX "l")
+                ( PlusX
+                    ( BindX
+                        "_"
+                        TNum
+                        (SetX (IdX "l") (NumX 5))
+                        (DerefX (IdX "l"))
+                    )
+                    (NumX 1)
+                )
+            )
+            (DerefX (IdX "l"))
+        )
+    )
+    == Just (NumV 6)
+
+-- CONCAT TEST CASES
+
+testConcatSimple =
+  interpret
+    (ConcatX (StringLangX "Hello ") (StringLangX "World"))
+    == Just (StringV "Hello World")
+
+testConcatEmpty =
+  interpret
+    (ConcatX (StringLangX "") (StringLangX "abc"))
+    == Just (StringV "abc")
+
+testConcatNested =
+  interpret
+    ( ConcatX
+        (ConcatX (StringLangX "A") (StringLangX "B"))
+        (StringLangX "C")
+    )
+    == Just (StringV "ABC")
+
+testConcatWithBind =
+  interpret
+    ( BindX
+        "s"
+        TString
+        (StringLangX "Hi")
+        (ConcatX (IdX "s") (StringLangX "!"))
+    )
+    == Just (StringV "Hi!")
+
+testConcatShadowing =
+  interpret
+    ( BindX
+        "s"
+        TString
+        (StringLangX "Hello")
+        ( BindX
+            "s"
+            TString
+            (StringLangX "World")
+            (ConcatX (IdX "s") (StringLangX "!"))
+        )
+    )
+    == Just (StringV "World!")
+
+testConcatTypeFail =
+  interpret
+    (ConcatX (StringLangX "A") (NumX 3))
+
+-- expected: Nothing
+
+allTests =
+  [ testNewDeref,
+    testSetSimple,
+    testSetThenDeref,
+    testIncrement,
+    testAliasing,
+    testShadowing,
+    testFunctionMutation,
+    testNestedMutation,
+    -- Concat tests
+    testConcatSimple,
+    testConcatEmpty,
+    testConcatNested,
+    testConcatWithBind,
+    testConcatShadowing
+  ]
