@@ -6,6 +6,14 @@
 
 import Control.Monad
 
+-- Feature 3: Pattern Matching
+data PatternMatching where
+  PNum :: Int -> PatternMatching
+  PBool :: Bool -> PatternMatching
+  PString :: String -> PatternMatching
+  PCatcher :: PatternMatching -- This is to catch patterns and match to anything.
+  deriving (Show, Eq)
+
 data TripleThreatType where
   TNum :: TripleThreatType
   TBool :: TripleThreatType
@@ -40,6 +48,7 @@ data TripleThreat where
   Concat :: TripleThreat -> TripleThreat -> TripleThreat
   StringLang :: String -> TripleThreat
   -- Feature 3: Pattern Matching.
+  MatchPattern :: TripleThreat -> [(PatternMatching, TripleThreat)] -> TripleThreat
   deriving (Show, Eq)
 
 data TripleThreatExt where
@@ -69,6 +78,7 @@ data TripleThreatExt where
   ConcatX :: TripleThreatExt -> TripleThreatExt -> TripleThreatExt
   StringLangX :: String -> TripleThreatExt
   -- Feature 3: Pattern Matching.
+  MatchPatternX :: TripleThreatExt -> [(PatternMatching, TripleThreatExt)] -> TripleThreatExt
   deriving (Show, Eq)
 
 data TripleThreatVal where
@@ -83,6 +93,7 @@ type EnvVal = [(String, TripleThreatVal)]
 
 type Cont = [(String, TripleThreatType)]
 
+-- Helpers for Feature 1: Storage.
 type Loc = Int
 
 type Store = (Loc, StoreFunc)
@@ -100,6 +111,34 @@ derefStore (_, s) l = s l
 
 newStore :: Store -> TripleThreatVal -> (Store, Loc)
 newStore (i, s) v = ((i + 1, \m -> if m == i then Just v else s m), i)
+
+-- Helpers for Feature 3: Pattern Matching.
+patternMatchType :: PatternMatching -> TripleThreatType -> Bool
+patternMatchType (PNum _) TNum = True -- Given a PNum and a TNum, they are of the same type. Return True.
+patternMatchType (PBool _) TBool = True -- Given a PBool and a TBool, they are of the same type. Return True.
+patternMatchType (PString _) TString = True -- Given a PString and a TString, they are of the same type. Return True.
+patternMatchType PCatcher _ = True -- Given a PCatcher, then return True since the type doesn't matter.
+patternMatchType _ _ = False -- Otherwise, return False.
+
+checkBranchType :: Cont -> TripleThreatType -> (PatternMatching, TripleThreat) -> Maybe TripleThreatType
+checkBranchType g val_type (p, body) =
+  -- Checks that the value and the pattern to match is of the same type. If not return Nothing.
+  if patternMatchType p val_type then typeof g body else fail "Fail: Pattern and branch types do not match"
+
+-- Helps determine if a pattern and a value are a match
+patternMatchEval :: PatternMatching -> TripleThreatVal -> Bool
+patternMatchEval (PNum l) (NumV r) = l == r -- Given a PNum and a NumV, check if the contents are the same.
+patternMatchEval (PBool l) (BooleanV r) = l == r -- Given a PBool and a BooleanV, check if the contents are the same.
+patternMatchEval (PString l) (StringV r) = l == r -- Given a PString and a StringV, check if the contents are the same.
+patternMatchEval PCatcher _ = True -- Given a PCatcher, return True since the value doesn't matter.
+patternMatchEval _ _ = False -- Otherwise, return False.
+
+-- Helper function that iterates through all of the branches to find a match
+checkBranchEval :: TripleThreatVal -> EnvVal -> Store -> [(PatternMatching, TripleThreat)] -> Maybe (Store, TripleThreatVal)
+checkBranchEval _ _ _ [] = fail "Fail: No pattern match found"
+checkBranchEval val env sto ((p, body) : restBranchList) =
+  -- Check a branch and see if there is a match, then evaluate the body. Otherwise, check the rest of the branches.
+  if patternMatchEval p val then eval env sto body else checkBranchEval val env sto restBranchList
 
 -- ========== Project Exercises ========== --
 
@@ -154,6 +193,7 @@ substitution i v (Deref l) = Deref (substitution i v l)
 -- l could be a StringLang or Id, or other. Ex.: sub x="A" in Concat (x "B")
 substitution i v (Concat l r) = Concat (substitution i v l) (substitution i v r)
 substitution i v (StringLang str) = StringLang str
+substitution i v (MatchPattern val branches) = MatchPattern (substitution i v val) (map (\(p, b) -> (p, substitution i v b)) branches)
 
 elabTerm :: TripleThreatExt -> TripleThreat
 elabTerm (NumX n) = Num n -- Return the KULang equivalent.
@@ -179,6 +219,8 @@ elabTerm (SetX l v) = Set (elabTerm l) (elabTerm v) -- Return the KULang equival
 elabTerm (DerefX l) = Deref (elabTerm l) -- Return the KULang equivalent.
 elabTerm (ConcatX l r) = Concat (elabTerm l) (elabTerm r) -- Return the KULang equivalent.
 elabTerm (StringLangX str) = StringLang str -- Return the KULang equivalent.
+-- We will elaborate on the value to match. We will also elaborate on the body of the branch, but keep the pattern the same, no elaboration needed.
+elabTerm (MatchPatternX val branches) = MatchPattern (elabTerm val) (map (\(p, b) -> (p, elabTerm b)) branches)
 
 -- Part 1 - Type Inference
 typeof :: Cont -> TripleThreat -> (Maybe TripleThreatType)
@@ -261,6 +303,14 @@ typeof g (Concat l r) = do
   TString <- typeof g r -- Checks if the right is a type of String.
   return TString -- If it has evaluated here, then return Maybe TString as the result.
 typeof g (StringLang str) = return TString -- Return a TString if given a String.
+typeof g (MatchPattern val branches) = do
+  val_type <- typeof g val -- Check the type of the value to be patterned matched.
+  branch_types <- mapM (checkBranchType g val_type) branches -- Get the types for all the branch bodies.
+  case branch_types of
+    [] -> fail "Fail: No branches found in the match statement." -- If empty list is returned, then no branches are found in the match statement.
+    -- Otherwise, takes the head of the list to get the first branch's type. Then, checks that it is equal to the rest of the branch types.
+    (first_type : rest_type) ->
+      if all (== first_type) rest_type then return first_type else fail "Fail: Types of branch bodies do not match."
 
 -- Part 2 - Evaluation
 eval :: EnvVal -> Store -> TripleThreat -> Maybe (Store, TripleThreatVal)
@@ -361,6 +411,9 @@ eval env sto (Concat l r) = do
   return (sto2, StringV (x ++ y)) -- Return the concatenate the strings together.
 eval env sto (StringLang str) = do
   return (sto, (StringV str)) -- Return the StringV type.
+eval env sto (MatchPattern val branches) = do
+  (sto1, v) <- eval env sto val -- Evaluate the value that we are matching
+  checkBranchEval v env sto1 branches -- Try and match the value against the branches list.
 
 -- Part 3 - Interpretation
 interpret :: TripleThreatExt -> Maybe TripleThreatVal
@@ -373,6 +426,31 @@ interpret expr =
         Just _ -> case eval [] initStore elab_expr of
           Nothing -> Nothing -- If eval had an error, then return Nothing.
           Just (_, v) -> Just v -- Otherwise, just return the value and not the Store to the use
+
+-- Additional Feature to Get a Clue To Unlock the Key.
+getClue :: Int -> IO ()
+getClue 1 = putStrLn "Create and return a storage of our favorite EECS class."
+getClue 2 = putStrLn "Write an arithmetic expression whose answer is Gen-Z slang."
+getClue 3 = putStrLn "Concatenate the clues together."
+getClue _ = putStrLn "EH EHHHH EHHHHHHH! Try again by inputting numbers 1-3."
+
+-- Additional Helper to Show Output Value.
+showVal :: TripleThreatVal -> String
+showVal (NumV n) = show n
+showVal (BooleanV b) = show b
+showVal (StringV s) = s
+showVal (LocV l) = "Location " ++ show l
+
+-- Additional Feature to Reveal the Key.
+reveal :: TripleThreatExt -> IO ()
+reveal expr =
+  case interpret expr of
+    Nothing -> putStrLn "Error in your expression. Try again to reveal the key."
+    Just x -> case x of
+      NumV 662 -> putStrLn "Grad"
+      NumV 67 -> putStrLn "UAte ;)"
+      StringV "GradUAte ;)" -> putStrLn "Success! You have unlocked the door. TripleThreat out ✌️!"
+      _ -> putStrLn (showVal x)
 
 -- Test Cases
 
@@ -618,6 +696,76 @@ testConcatTypeFail =
 
 -- expected: Nothing
 
+-- TEST CASES FOR FEATURE 3
+testMatchNumExact =
+  interpret
+    ( MatchPatternX
+        (NumX 5)
+        [ (PNum 5, StringLangX "five"),
+          (PCatcher, StringLangX "other")
+        ]
+    )
+    == Just (StringV "five")
+
+testMatchNumFallback =
+  interpret
+    ( MatchPatternX
+        (NumX 10)
+        [ (PNum 5, StringLangX "five"),
+          (PCatcher, StringLangX "other")
+        ]
+    )
+    == Just (StringV "other")
+
+testMatchString =
+  interpret
+    ( MatchPatternX
+        (StringLangX "hi")
+        [ (PString "bye", NumX 0),
+          (PString "hi", NumX 42)
+        ]
+    )
+    == Just (NumV 42)
+
+testMatchNoMatch =
+  interpret
+    ( MatchPatternX
+        (NumX 7)
+        [ (PNum 1, NumX 10),
+          (PNum 2, NumX 20)
+        ]
+    )
+    == Nothing
+
+testMatchOrder =
+  interpret
+    ( MatchPatternX
+        (NumX 3)
+        [ (PNum 3, NumX 100),
+          (PCatcher, NumX 999)
+        ]
+    )
+    == Just (NumV 100)
+
+testMatchOnlyCatcher =
+  interpret
+    ( MatchPatternX
+        (BooleanX False)
+        [ (PCatcher, StringLangX "always")
+        ]
+    )
+    == Just (StringV "always")
+
+testMatchTypeConsistency =
+  interpret
+    ( MatchPatternX
+        (NumX 1)
+        [ (PNum 1, NumX 10),
+          (PCatcher, BooleanX True) -- different type
+        ]
+    )
+    == Nothing
+
 allTests =
   [ testNewDeref,
     testSetSimple,
@@ -632,5 +780,13 @@ allTests =
     testConcatEmpty,
     testConcatNested,
     testConcatWithBind,
-    testConcatShadowing
+    testConcatShadowing,
+    -- Pattern Matching tests
+    testMatchNumExact,
+    testMatchNumFallback,
+    testMatchString,
+    testMatchNoMatch,
+    testMatchOrder,
+    testMatchOnlyCatcher,
+    testMatchTypeConsistency
   ]
