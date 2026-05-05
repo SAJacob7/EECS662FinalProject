@@ -1,5 +1,16 @@
 {-
-    Comment
+    Program Name: EECS 662 Final Project
+    Author: Sophia Jacob, Anna Lin, Kusuma Murthy
+    Creation Date: 4/30/2026
+    Last modified: 5/4/2026
+    Test Cases: Test Cases are at the bottom with a list of them called: allTests and the ones provided in the Project 5 template file.
+                These are different test cases for the different new functionalities.
+                When you call the allTests variable, it should return all True for the test cases for the expected and actual answers to match.
+    Story Line: Use the getClue function to get clues 1-3. With these clues, figure out the right
+                TripleThreatExt expression and pass it in to the reveal function.
+                The reveal function will either give you the answer back or if you type in the right expression,
+                it will give you the corresponding key to the clue.
+                Solve all the clues to escape.
 -}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE PostfixOperators #-}
@@ -511,6 +522,7 @@ testIsEven =
     )
     == Just (BooleanV False)
 
+-- STORAGE TEST CASES
 testNewDeref =
   interpret (DerefX (NewX (NumX 3)))
     == Just (NumV 3)
@@ -696,7 +708,7 @@ testConcatTypeFail =
 
 -- expected: Nothing
 
--- TEST CASES FOR FEATURE 3
+-- TEST CASES FOR PATTERN MATCHING
 testMatchNumExact =
   interpret
     ( MatchPatternX
